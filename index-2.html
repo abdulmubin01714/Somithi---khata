@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>সমিতি খাতা</title>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;background:#f5f0e8;padding:20px}
+#app{max-width:500px;margin:auto;background:white;border-radius:16px;padding:20px;box-shadow:0 4px 12px rgba(0,0,0,.1)}
+button{cursor:pointer;font-size:14px}
+.cover{text-align:center;padding:20px 0}.coverTitle{font-size:28px;color:#2d5a27}
+.stampRow{display:flex;justify-content:center;gap:20px;margin:20px 0}.stamp{padding:15px;border:2px solid #2d5a27;border-radius:12px;min-width:100px}
+.choice,.memberPick{display:block;width:100%;padding:12px;margin:8px 0;border:1px solid #ccc;border-radius:8px;background:#fafafa;text-align:left}
+.search{display:flex;gap:8px;margin:15px 0}.search input{flex:1;padding:10px;border:1px solid #ccc;border-radius:8px}
+.modalBg{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:10}
+.modal{background:white;padding:25px;border-radius:16px;max-width:400px;width:90%}
+.input{width:100%;padding:10px;margin:8px 0;border:1px solid #ccc;border-radius:8px}
+.primary{width:100%;padding:12px;background:#2d5a27;color:white;border:none;border-radius:8px;margin-top:10px}
+.danger{background:#a13d3d}.close{float:right;background:none;border:none;font-size:24px}
+.card{background:#f9f9f9;padding:12px;margin:8px 0;border-radius:8px}.bottom{display:flex;justify-content:space-between;margin-top:8px;padding-top:8px;border-top:1px dashed #ccc}
+.notice{background:#fff8e1;padding:12px;margin:8px 0;border-radius:8px}.tab{padding:8px 16px;background:#eee;border:none;border-radius:4px 4px 0 0}.tab.active{background:#2d5a27;color:white}.tabs{display:flex;gap:4px;margin-bottom:15px}
+.err{color:#a13d3d;font-size:13px;margin-top:5px}.small{display:block;color:#666;font-size:12px;margin-top:4px}
+@media print{body{background:#fff;padding:0}#app{max-width:none;box-shadow:none}.printReport{display:block!important}.cover,#app>div:not(.printReport){display:none!important}}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+const FIREBASE_CONFIG={
+ apiKey:"AIzaSyDKTdMFRQ_ZNwiN6TAl9KjJwM4wFVt9_8U",
+ authDomain:"somithi-khatha1.firebaseapp.com",
+ projectId:"somithi-khatha1",
+ storageBucket:"somithi-khatha1.firebasestorage.app",
+ messagingSenderId:"815660825212",
+ appId:"1:815660825212:web:fd892b564c5b452ecb27f9"
+};
+const KEY="somiti-data-v1",ROOMKEY="somiti-room-code-v1";
+const DEF={somitiName:"আমাদের সমিতি",adminPinHash:null,members:[],entries:[],notices:[]};
+let DATA={...DEF},ROOM=localStorage.getItem(ROOMKEY)||"",db=null,unsub=null;
+let UI={role:null,tab:"members",modal:null,q:"",err:"",firstPin:false,edit:null};
+
+try{firebase.initializeApp(FIREBASE_CONFIG);db=firebase.firestore()}catch(e){console.log("Firebase init error:",e)}
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const bn=n=>Number(n||0).toLocaleString("bn-BD");
+const taka=n=>"৳"+bn(n);
+const dateISO=()=>new Date().toISOString().slice(0,10);
+const dateBN=x=>x?new Date(x+"T00:00:00").toLocaleDateString("bn-BD",{year:"numeric",month:"long",day:"numeric"}):"";
+const uid=()=>Math.random().toString(36).slice(2,10);
+
+async function hashPin(p){
+ const b=await crypto.subtle.digest("SHA-256",new TextEncoder().encode("somiti-salt::"+p));
+ return [...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,"0")).join("");
+}
+function loadData(){
+ try{const stored=localStorage.getItem(KEY);DATA=stored?{...DEF,...JSON.parse(stored)}:{...DEF}}
+ catch(e){DATA={...DEF}}
+}
+function save(){
+ localStorage.setItem(KEY,JSON.stringify(DATA));
+ if(db&&ROOM)db.collection("somiti-rooms").doc(ROOM).set(DATA,{merge:true}).catch(e=>console.log(e));
+}
+function sync(){
+ if(!db||!ROOM)return;
+ if(unsub)unsub();
+ unsub=db.collection("somiti-rooms").doc(ROOM).onSnapshot(s=>{
+  if(s.exists)DATA={...DEF,...s.data()};
+  else db.collection("somiti-rooms").doc(ROOM).set(DATA,{merge:true}).catch(()=>{});
+  localStorage.setItem(KEY,JSON.stringify(DATA));render();
+ });
+}
+const total=()=>DATA.entries.reduce((s,e)=>s+Number(e.amount||0),0);
+const mtotal=id=>DATA.entries.filter(e=>e.memberId===id).reduce((s,e)=>s+Number(e.amount||0),0);
+
+function render(){
+ let html=UI.role==="admin"?adminView():UI.role==="all"?allView():UI.role&&UI.role.memberId?memberView(UI.role.memberId):gateView();
+ $("#app").innerHTML=html+printReport();
+ if(UI.modal)showModal(UI.modal);
+ bindEvents();
+}
+function gateView(){
+ const q=UI.q.toLowerCase();
+ const ms=DATA.members.filter(m=>(m.name||"").toLowerCase().includes(q));
+ return `<div class="cover"><h1 class="coverTitle">${esc(DATA.somitiName)}</h1><p>সদস্য চাঁদা ও জমার হিসাব খাতা</p>
+ <div class="stampRow"><div class="stamp"><div>মোট সদস্য</div><strong>${bn(DATA.members.length)}</strong></div><div class="stamp"><div>মোট জমা</div><strong>${taka(total())}</strong></div></div>
+ <div>${db?(ROOM?"🟢 লাইভ সিঙ্ক":"🟡 Room Code প্রয়োজন"):"⚪ লোকাল মোড"}</div></div>
+ <button class="choice" data-act="admin">🔐 এডমিন</button><button class="choice" data-act="all">👁️ সবার হিসাব দেখুন</button><button class="choice" data-act="room">☁️ Room Code</button>
+ <h3>সদস্যের ব্যক্তিগত হিসাব</h3><div class="search"><input id="q" placeholder="সদস্যের নাম খুঁজুন" value="${esc(UI.q)}"></div>
+ ${ms.length?ms.map(m=>`<button class="memberPick" data-member="${m.id}"><strong>${esc(m.name)}</strong><small class="small">মোট জমা: ${taka(mtotal(m.id))}</small></button>`).join(""):"<p>কোনো সদস্য পাওয়া যায়নি</p>"}
+ <h3>📌 নোটিশ বোর্ড</h3>${DATA.notices.length?DATA.notices.map(n=>`<div class="notice"><strong>${esc(n.title)}</strong><p>${esc(n.text)}</p><small>${dateBN(n.date)}</small></div>`).join(""):"<p>কোনো নোটিশ নেই</p>"}`;
+}
+function adminView(){return `<div><button data-act="home">← ফিরে যান</button><h2>এডমিন প্যানেল</h2>
+<div class="tabs"><button class="tab ${UI.tab==="members"?"active":""}" data-tab="members">সদস্য</button><button class="tab ${UI.tab==="entries"?"active":""}" data-tab="entries">জমা</button><button class="tab ${UI.tab==="notices"?"active":""}" data-tab="notices">নোটিশ</button></div>
+${UI.tab==="members"?membersAdmin():UI.tab==="entries"?entriesAdmin():noticesAdmin()}</div>`}
+function membersAdmin(){return `<button class="primary" data-modal="member">＋ সদস্য যোগ করুন</button>
+${DATA.members.map((m,i)=>`<div class="card"><strong>${bn(i+1)}. ${esc(m.name)}</strong><small class="small">${esc(m.phone||"ফোন নেই")}</small><div class="bottom"><span>মোট জমা: ${taka(mtotal(m.id))}</span><div><button data-edit-member="${m.id}">✎</button> <button class="danger" data-del-member="${m.id}">×</button></div></div></div>`).join("")||"<p>সদস্য নেই</p>"}`}
+function entriesAdmin(){return `<button class="primary" data-modal="entry">＋ জমা যোগ করুন</button>
+${DATA.entries.slice().sort((a,b)=>(b.date||"").localeCompare(a.date||"")).map(e=>{const m=DATA.members.find(x=>x.id===e.memberId);return `<div class="card"><strong>${esc(m?.name||"অজানা সদস্য")}</strong><small class="small">${dateBN(e.date)} • ${esc(e.note||"চাঁদা")}</small><div class="bottom"><span>জমা: ${taka(e.amount)}</span><button class="danger" data-del-entry="${e.id}">×</button></div></div>`}).join("")||"<p>জমার হিসাব নেই</p>"}`}
+function noticesAdmin(){return `<button class="primary" data-modal="notice">＋ নোটিশ যোগ করুন</button>
+${DATA.notices.map(n=>`<div class="notice"><strong>${esc(n.title)}</strong><p>${esc(n.text)}</p><small>${dateBN(n.date)}</small> <button class="danger" data-del-notice="${n.id}">×</button></div>`).join("")||"<p>নোটিশ নেই</p>"}<button class="primary" data-act="pdf">📄 PDF / Print রিপোর্ট</button>`}
+function allView(){return `<div><button data-act="home">← ফিরে যান</button><h2>সবার হিসাব</h2><div class="card"><strong>মোট সদস্য: ${bn(DATA.members.length)}</strong><div class="bottom"><span>মোট জমা</span><span>${taka(total())}</span></div></div>
+${DATA.members.map((m,i)=>`<div class="card"><strong>${bn(i+1)}. ${esc(m.name)}</strong><small class="small">${esc(m.phone||"")}</small><div class="bottom"><span>মোট জমা</span><span>${taka(mtotal(m.id))}</span></div></div>`).join("")}<button class="primary" data-act="pdf">📄 PDF / Print রিপোর্ট</button></div>`}
+function memberView(id){const m=DATA.members.find(x=>x.id===id),es=DATA.entries.filter(e=>e.memberId===id);return `<div><button data-act="home">← ফিরে যান</button><h2>${esc(m?.name||"সদস্য")}</h2><div class="card"><strong>মোট জমা</strong><div style="font-size:24px;color:#2d5a27">${taka(mtotal(id))}</div></div><h3>জমার তালিকা</h3>${es.map(e=>`<div class="card"><div>${dateBN(e.date)} - ${taka(e.amount)}</div><small>${esc(e.note||"চাঁদা")}</small></div>`).join("")||"<p>কোনো জমা নেই</p>"}</div>`}
+function printReport(){return `<div class="printReport" style="display:none"><h1>${esc(DATA.somitiName)}</h1><p>সদস্য চাঁদা ও জমার হিসাব</p><p>মোট সদস্য: ${bn(DATA.members.length)} | মোট জমা: ${taka(total())}</p><table border="1" cellpadding="5" style="width:100%"><tr><th>ক্রম</th><th>সদস্য</th><th>ফোন</th><th>মোট জমা</th></tr>${DATA.members.map((m,i)=>`<tr><td>${bn(i+1)}</td><td>${esc(m.name)}</td><td>${esc(m.phone||"")}</td><td>${taka(mtotal(m.id))}</td></tr>`).join("")}</table></div>`}
+
+function showModal(type){
+ let content="";
+ if(type==="pin")content=`<h3>এডমিন PIN</h3><input class="input" id="pin" type="password" placeholder="${UI.firstPin?"নতুন PIN দিন":"PIN দিন"}" maxlength="20"><div class="err">${esc(UI.err)}</div><button class="primary" data-submit="pin">${UI.firstPin?"PIN সেট করুন":"প্রবেশ করুন"}</button>`;
+ else if(type==="member"){const m=UI.edit?DATA.members.find(x=>x.id===UI.edit):null;content=`<h3>${m?"সদস্য সম্পাদনা":"নতুন সদস্য"}</h3><input class="input" id="mname" placeholder="নাম" value="${esc(m?.name||"")}"><input class="input" id="mphone" placeholder="ফোন" value="${esc(m?.phone||"")}"><button class="primary" data-submit="member">${m?"সংরক্ষণ":"যোগ করুন"}</button>`}
+ else if(type==="entry")content=`<h3>নতুন জমা</h3><select class="input" id="emember">${DATA.members.map(m=>`<option value="${m.id}">${esc(m.name)}</option>`).join("")}</select><input class="input" id="edate" type="date" value="${dateISO()}"><input class="input" id="eamount" type="number" placeholder="টাকার পরিমাণ"><input class="input" id="enote" placeholder="বিবরণ" value="মাসিক চাঁদা"><button class="primary" data-submit="entry">জমা সংরক্ষণ</button>`;
+ else if(type==="notice")content=`<h3>নতুন নোটিশ</h3><input class="input" id="ntitle" placeholder="শিরোনাম"><textarea class="input" id="ntext" rows="4" placeholder="বিস্তারিত"></textarea><button class="primary" data-submit="notice">নোটিশ প্রকাশ</button>`;
+ else if(type==="room")content=`<h3>Firebase Room Code</h3><p style="font-size:12px;color:#666">একই Room Code অন্য ফোনে দিলে একই হিসাব দেখা যাবে।</p><input class="input" id="room" placeholder="Room Code" value="${esc(ROOM)}" maxlength="20"><button class="primary" data-submit="room">সংযোগ করুন</button>${ROOM?'<button class="primary danger" data-submit="leave">Room বিচ্ছিন্ন</button>':""}`;
+ $("#app").insertAdjacentHTML("beforeend",`<div class="modalBg"><div class="modal"><button class="close" data-act="close">×</button>${content}</div></div>`);
+}
+function closeModal(){UI.modal=null;UI.err="";UI.edit=null;render()}
+function bindEvents(){
+ const qInput=$("#q");if(qInput)qInput.addEventListener("input",e=>{UI.q=e.target.value;render()});
+ document.querySelectorAll("[data-act]").forEach(b=>b.onclick=async()=>{const a=b.dataset.act;
+  if(a==="admin"){UI.err="";UI.firstPin=!DATA.adminPinHash;UI.modal="pin";render()}
+  else if(a==="all"){UI.role="all";render()}
+  else if(a==="room"){UI.modal="room";render()}
+  else if(a==="home"){UI.role=null;render()}
+  else if(a==="close")closeModal()
+  else if(a==="pdf")window.print()
+ });
+ document.querySelectorAll("[data-member]").forEach(b=>b.onclick=()=>{UI.role={memberId:b.dataset.member};render()});
+ document.querySelectorAll("[data-tab]").forEach(b=>b.onclick=()=>{UI.tab=b.dataset.tab;render()});
+ document.querySelectorAll("[data-modal]").forEach(b=>b.onclick=()=>{UI.modal=b.dataset.modal;UI.edit=null;render()});
+ document.querySelectorAll("[data-edit-member]").forEach(b=>b.onclick=()=>{UI.edit=b.dataset.editMember;UI.modal="member";render()});
+ document.querySelectorAll("[data-del-member]").forEach(b=>b.onclick=()=>{if(confirm("এই সদস্য ও তার জমার হিসাব মুছে ফেলবেন?")){const id=b.dataset.delMember;DATA.members=DATA.members.filter(m=>m.id!==id);DATA.entries=DATA.entries.filter(e=>e.memberId!==id);save();render()}});
+ document.querySelectorAll("[data-del-entry]").forEach(b=>b.onclick=()=>{if(confirm("এই জমাটি মুছে ফেলবেন?")){DATA.entries=DATA.entries.filter(e=>e.id!==b.dataset.delEntry);save();render()}});
+ document.querySelectorAll("[data-del-notice]").forEach(b=>b.onclick=()=>{if(confirm("এই নোটিশ মুছে ফেলবেন?")){DATA.notices=DATA.notices.filter(n=>n.id!==b.dataset.delNotice);save();render()}});
+ document.querySelectorAll("[data-submit]").forEach(b=>b.onclick=async()=>submitForm(b.dataset.submit));
+}
+async function submitForm(type){
+ if(type==="pin"){
+  const p=$("#pin")?.value||"";if(!p){UI.err="PIN দিন";render();return}
+  const h=await hashPin(p);
+  if(UI.firstPin){DATA.adminPinHash=h;save();UI.role="admin";UI.modal=null;UI.firstPin=false;render()}
+  else if(h===DATA.adminPinHash){UI.role="admin";UI.modal=null;UI.err="";render()}
+  else{UI.err="ভুল PIN";render()}
+ }else if(type==="member"){
+  const name=$("#mname")?.value.trim(),phone=$("#mphone")?.value.trim();if(!name){alert("নাম দিন");return}
+  if(UI.edit){const m=DATA.members.find(x=>x.id===UI.edit);if(m){m.name=name;m.phone=phone}}
+  else DATA.members.push({id:uid(),name,phone});
+  save();UI.modal=null;UI.edit=null;render()
+ }else if(type==="entry"){
+  const memberId=$("#emember")?.value,amount=Number($("#eamount")?.value||0),date=$("#edate")?.value,note=$("#enote")?.value.trim();
+  if(!memberId||amount<=0){alert("সদস্য ও সঠিক টাকার পরিমাণ দিন");return}
+  DATA.entries.push({id:uid(),memberId,amount,date,note});save();UI.modal=null;render()
+ }else if(type==="notice"){
+  const title=$("#ntitle")?.value.trim(),text=$("#ntext")?.value.trim();if(!title||!text){alert("শিরোনাম ও বিস্তারিত দিন");return}
+  DATA.notices.unshift({id:uid(),title,text,date:dateISO()});save();UI.modal=null;render()
+ }else if(type==="room"){
+  const r=$("#room")?.value.trim();if(!r){alert("Room Code দিন");return}
+  ROOM=r;localStorage.setItem(ROOMKEY,ROOM);UI.modal=null;loadData();sync();render()
+ }else if(type==="leave"){
+  if(unsub)unsub();unsub=null;ROOM="";localStorage.removeItem(ROOMKEY);UI.modal=null;render()
+ }
+}
+loadData();
+if(ROOM)sync();
+render();
+</script>
+</body>
+</html>
